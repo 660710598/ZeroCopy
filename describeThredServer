@@ -1,0 +1,163 @@
+/*
+ * ========= IMPORTS =========
+ * เรา import เครื่องมือที่จำเป็น
+ */
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.nio.channels.FileChannel;
+import java.nio.channels.ServerSocketChannel;
+import java.nio.channels.SocketChannel;
+import java.io.DataInputStream;     // สำหรับอ่าน "คำสั่ง" (String, long)
+import java.io.DataOutputStream;    // สำหรับส่ง "คำสั่ง" (long)
+import java.util.concurrent.ExecutorService; // ⬅️ หัวใจหลัก: "บริการ Thread Pool"
+import java.util.concurrent.Executors;       // ⬅️ เครื่องมือสร้าง Thread Pool
+
+/**
+ * นี่คือ Server เวอร์ชัน "ThreadPool"
+ * มันถูกออกแบบมาให้ "เสถียร" และ "ไม่ล่ม" 
+ * แม้จะมี Client "รุม" เชื่อมต่อเข้ามาพร้อมกันเป็นพันๆ ครั้ง
+ */
+public class ZeroCopyServer_ThreadPool { 
+
+    /*
+     * ========= CONFIGURATION (ค่าตั้งค่า) =========
+     */
+    static final int PORT = 9999; // Port ที่ Server จะรอฟัง
+    static final String FILE_TO_SEND = "..\\\\FileSend1\\\\TestFileSent"; // ⬅️ ไฟล์ที่จะส่ง
+    
+    // ⬇️ ⬇️ นี่คือส่วนที่พัฒนาต่อยอด ⬇️ ⬇️
+    
+    // กำหนดจำนวน "พนักงานประจำ" ที่จะสร้างรอไว้
+    // (ถ้ามี CPU 8 cores, การตั้งไว้ที่ 8 หรือ 10 ก็เป็นจุดเริ่มต้นที่ดี)
+    static final int NUM_WORKER_THREADS = 10;
+    
+    // สร้าง "ทีมพนักงาน" (Thread Pool) ของเรา
+    // `newFixedThreadPool` หมายความว่า "สร้างพนักงาน 10 คน และมี 10 คนนี้ตลอดไป"
+    static final ExecutorService executor = Executors.newFixedThreadPool(NUM_WORKER_THREADS);
+    // `executor` เปรียบเสมือน "ตะกร้าใส่ใบงาน" ที่มีพนักงาน 10 คนคอยหยิบงานไปทำ
+
+    /*
+     * ========= MAIN (ผู้จัดการ 🧠) =========
+     */
+    public static void main(String[] args) throws IOException {
+
+        // 1. เปิด ServerSocketChannel และ bind port (เหมือน Server ทั่วไป)
+        ServerSocketChannel serverSocket = ServerSocketChannel.open();
+        serverSocket.bind(new InetSocketAddress(PORT));
+        System.out.println("Server (ThreadPool) is listening on port " + PORT);
+        System.out.println("Running with " + NUM_WORKER_THREADS + " worker threads.");
+
+        // 2. Main Thread จะกลายเป็น "ผู้จัดการ"
+        //    วนลูปตลอดไปเพื่อ "รับสาย" (accept) และ "คัดแยกงาน"
+        while (true) {
+            
+            // 3. รอรับ Client (Main Thread จะหยุดรอตรงนี้)
+            SocketChannel clientSocket = serverSocket.accept();
+            System.out.println("\nServer : Accepted Connection from " + clientSocket.getRemoteAddress());
+
+            // 4. เมื่อ Client ต่อมาแล้ว... อ่าน "คำสั่ง" แรกทันที
+            //    เราต้องรู้ว่า Client คนนี้ต้องการอะไร
+            DataInputStream in = new DataInputStream(clientSocket.socket().getInputStream());
+            String cmd = in.readUTF(); // อ่าน String ที่ Client ส่งมา
+
+            // 5. "คัดแยกงาน"
+            if (cmd.equals("SIZE")) {
+                // --------------------------------
+                // ถ้า Client ขอ "SIZE" (งานง่ายๆ)
+                // --------------------------------
+                // งานนี้เบามาก (แค่เช็คขนาดไฟล์) "ผู้จัดการ" (Main Thread) ทำเองเลย
+                System.out.println("Server : Client requested file size.");
+                try (FileChannel fileChannel = new FileInputStream(FILE_TO_SEND).getChannel()) {
+                    long fileSize = fileChannel.size();
+                    
+                    // ส่งขนาดไฟล์ (long) กลับไป
+                    DataOutputStream out = new DataOutputStream(clientSocket.socket().getOutputStream());
+                    out.writeLong(fileSize); 
+                    out.flush();
+                }
+                // ปิดการเชื่อมต่อทันที เพราะงาน "SIZE" เสร็จแล้ว
+                clientSocket.close(); 
+
+            } else if (cmd.equals("GET")) { // ⬅️ (เราปรับปรุงให้รับ "GET" ชัดเจน)
+                // --------------------------------
+                // ถ้า Client ขอ "GET" (งานหนัก)
+                // --------------------------------
+                
+                // นี่คืองาน "ส่งของ" (ส่งไฟล์) ซึ่งหนักและใช้เวลา
+                // "ผู้จัดการ" (Main Thread) จะไม่ทำเอง
+                
+                // 6. สร้าง "ใบงาน" (Runnable)
+                //    (เราต้องส่ง clientSocket และ in ไปให้พนักงานด้วย)
+                Runnable handler = new FileSenderHandler(clientSocket, FILE_TO_SEND, in);
+                
+                // 7. โยน "ใบงาน" เข้า "ตะกร้า" (Thread Pool)
+                executor.submit(handler); 
+                
+                //    "ผู้จัดการ" (Main Thread) ไม่รอ!
+                //    มันจะวนกลับไป accept() รอรับสาย Client คนต่อไปทันที
+                
+            } else {
+                // ถ้าส่งคำสั่งมาแปลกๆ
+                System.err.println("Server : Unknown command: " + cmd);
+                clientSocket.close();
+            }
+        }
+    }
+
+    /*
+     * ========= FileSenderHandler (พนักงานส่งของ 🚚) =========
+     *
+     * นี่คือ "ใบงาน" (Runnable) ที่ "พนักงาน" (Thread ใน Pool) จะหยิบไปทำ
+     * มันมีหน้าที่จัดการ Client 1 คน (ที่ขอ "GET") จนเสร็จ
+     */
+    public static class FileSenderHandler implements Runnable {
+        private SocketChannel clientSocket;
+        private String fileToSend;
+        private DataInputStream in; // ⬅️ รับ "in" มาจาก main เพื่ออ่านต่อ
+
+        public FileSenderHandler(SocketChannel clientSocket, String fileToSend, DataInputStream in) {
+            this.clientSocket = clientSocket;
+            this.fileToSend = fileToSend;
+            this.in = in; // ⬅️ เก็บ "in" ไว้
+        }
+
+        @Override
+        public void run() {
+            // "พนักงาน" (Thread) เริ่มทำงาน
+            // เราใช้ try-with-resources เพื่อให้ทุกอย่างปิดอัตโนมัติ
+            try (SocketChannel channel = this.clientSocket; // 1. รับผิดชอบปิด Socket
+                 FileChannel fc = new FileInputStream(fileToSend).getChannel(); // 2. เปิดไฟล์ที่จะส่ง
+                 DataInputStream dataIn = this.in) { // 3. รับผิดชอบปิด DataInputStream
+
+                // 1. "ผู้จัดการ" (main) อ่าน "GET" ไปแล้ว
+                //    หน้าที่ของเราคืออ่าน "ส่วนที่เหลือ" ของคำสั่ง
+                long start = dataIn.readLong(); // อ่าน "ไบต์เริ่มต้น"
+                long end = dataIn.readLong();   // อ่าน "ไบต์สุดท้าย"
+                long size = end - start + 1;  // คำนวณขนาดที่ Client ขอก้อนนี้
+                
+                System.out.println("  (Thread " + Thread.currentThread().getId() + ") Sending bytes " + start + " to " + end);
+
+                // 2. 🌟 หัวใจหลัก: Zero Copy (transferTo) 🌟
+                //    ส่ง "เฉพาะส่วน" (Chunk) ที่ Client ขอ
+                long total = 0; // ตัวนับว่าส่งไปเท่าไหร่แล้ว (สำหรับก้อนนี้)
+                while (total < size) {
+                    // fc.transferTo(position, count, target)
+                    //   position: "เริ่มอ่าน" จากไฟล์ที่ตำแหน่ง "start + total"
+                    //   count:    ส่งเป็นจำนวน "size - total" (ส่วนที่เหลือ)
+                    //   target:   ส่งไปที่ "channel" (Client)
+                    long transferred = fc.transferTo(start + total, size - total, channel);
+                    total += transferred;
+                }
+                System.out.println("  (Thread " + Thread.currentThread().getId() + ") Sent " + total + " bytes.");
+
+            } catch (Exception e) {
+                // ถ้า Client คนนี้มีปัญหา (เช่น เน็ตหลุด)
+                // Thread นี้ก็จะจบการทำงานไป แต่ Server ไม่ล่ม
+                System.err.println("  (Thread " + Thread.currentThread().getId() + ") Error: " + e.getMessage());
+            }
+            // เมื่อ "run()" จบ "พนักงาน" (Thread) คนนี้ก็ว่าง
+            // มันจะวนกลับไปที่ "ตะกร้า" (Executor) เพื่อรอหยิบ "ใบงาน" ชิ้นต่อไป
+        }
+    }
+}
