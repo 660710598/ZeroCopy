@@ -1,4 +1,3 @@
-```Java
 /*
  * ========= IMPORTS =========
  * เรา import เครื่องมือที่จำเป็น
@@ -162,4 +161,3 @@ public class ZeroCopyServer_ThreadPool {
         }
     }
 }
-```
