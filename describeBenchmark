@@ -1,0 +1,140 @@
+// ----------------------------------------------------------------------
+// Import ที่จำเป็น
+// ----------------------------------------------------------------------
+
+// ใช้สำหรับอ้างอิงไฟล์ และ .delete() ไฟล์ขยะ
+import java.io.File; 
+// ใช้สำหรับ "อ่าน" ไฟล์ (แบบ Stream ดั้งเดิม)
+import java.io.FileInputStream; 
+// ใช้สำหรับ "เขียน" ไฟล์ (แบบ Stream ดั้งเดิม)
+import java.io.FileOutputStream; 
+// คลาสมาตรฐานสำหรับจัดการข้อผิดพลาด I/O
+import java.io.IOException; 
+// "ท่อ" สำหรับการอ่าน/เขียนไฟล์ (NIO)
+import java.nio.channels.FileChannel; 
+
+// ----------------------------------------------------------------------
+// คลาสสำหรับทดสอบ Benchmark
+// ----------------------------------------------------------------------
+public class BenchmarkCopy {
+
+    public static void main(String[] args) throws IOException {
+        
+        // ----------------------------------------------------------------------
+        // การตั้งค่า Benchmark
+        // ----------------------------------------------------------------------
+        
+        // ไฟล์ต้นทาง (ควรเป็นไฟล์ขนาดใหญ่พอสมควร)
+        String SOURCE_FILE = "C:\\Users\\realr\\OneDrive\\เอกสาร\\ZeroCopy1\\FIleSend1\\TestFileSent"; 
+        // โฟลเดอร์ปลายทาง
+        String SAVE_FOLDER_PATH = "C:\\Users\\realr\\OneDrive\\เอกสาร\\ZeroCopy1\\FileSave\\";
+        // ชื่อไฟล์ปลายทางสำหรับวิธี Normal
+        String DEST_NORMAL = "dest_normal_copy.dat";
+        // ชื่อไฟล์ปลายทางสำหรับวิธี Zero Copy
+        String DEST_ZERO_COPY = "dest_zero_copy.dat";
+
+        // สร้าง Object File เพื่อใช้ .length() ตรวจสอบขนาด
+        File source = new File(SOURCE_FILE);
+        long fileSize = source.length();
+
+        System.out.println("เริ่มต้น Benchmark ด้วยไฟล์: " + SOURCE_FILE);
+        // แปลงขนาดจาก bytes เป็น Megabytes (MB)
+        System.out.println("ขนาดไฟล์: " + (fileSize / (1024*1024)) + " MB"); 
+        System.out.println("----------------------------------------");
+
+        // ----------------------------------------------------------------------
+        // 1. จับเวลาแบบ Normal Copy (ใช้ Buffer)
+        // ----------------------------------------------------------------------
+        long startTimeNormal = System.currentTimeMillis();
+        // เรียกเมธอด normalCopy
+        normalCopy(SOURCE_FILE, DEST_NORMAL);
+        long endTimeNormal = System.currentTimeMillis();
+        long timeNormal = endTimeNormal - startTimeNormal;
+        
+        System.out.println("Normal Copy Time:   " + timeNormal + " ms");
+
+        // ----------------------------------------------------------------------
+        // 2. จับเวลาแบบ Zero Copy (transferTo)
+        // ----------------------------------------------------------------------
+        long startTimeZero = System.currentTimeMillis();
+        // เรียกเมธอด zeroCopy
+        zeroCopy(SOURCE_FILE, DEST_ZERO_COPY);
+        long endTimeZero = System.currentTimeMillis();
+        long timeZero = endTimeZero - startTimeZero;
+
+        System.out.println("Zero Copy Time:     " + timeZero + " ms");
+        System.out.println("----------------------------------------");
+        
+        // ----------------------------------------------------------------------
+        // 3. สรุปผล
+        // ----------------------------------------------------------------------
+        
+        // ป้องกันการหารด้วย 0 ถ้าการคัดลอกเร็วจนเป็น 0 ms
+        if (timeZero > 0) {
+            long difference = timeNormal - timeZero;
+            System.out.println("ส่วนต่าง (Normal - Zero): " + difference + " ms");
+        } else {
+            System.out.println("การทำงานทั้งคู่เร็วมาก (หรือเวลาเป็น 0)");
+        }
+
+        // ----------------------------------------------------------------------
+        // 4. ลบไฟล์ที่คัดลอกมาทิ้ง (Cleanup)
+        // ----------------------------------------------------------------------
+        new File(DEST_NORMAL).delete();
+        new File(DEST_ZERO_COPY).delete();
+        System.out.println("Benchmark สิ้นสุด. ลบไฟล์ปลายทางแล้ว");
+        
+    }
+
+    // ----------------------------------------------------------------------
+    // เมธอดที่ 1: การคัดลอกแบบ "Normal" (ดั้งเดิม)
+    // ----------------------------------------------------------------------
+    public static void normalCopy(String from, String to) throws IOException {
+        // ใช้ try-with-resources เปิด Stream ต้นทาง (Input) และปลายทาง (Output)
+        try (FileInputStream fis = new FileInputStream(from);
+             FileOutputStream fos = new FileOutputStream(to)) {
+            
+            // **จุดสำคัญของ Normal Copy**
+            // 1. สร้าง Buffer (ที่เก็บข้อมูลชั่วคราว) ขนาด 8KB
+            //    Buffer นี้ถูกสร้างในหน่วยความจำของ Java Application (User Space)
+            byte[] buffer = new byte[8192]; 
+            int bytesRead;
+
+            // 2. วน Loop อ่าน-เขียน
+            // (bytesRead = fis.read(buffer))
+            //   - อ่านข้อมูลจากไฟล์ (Kernel) มาใส่ใน 'buffer' (User Space)
+            //   - คืนค่าเป็นจำนวนไบต์ที่อ่านได้
+            //   - ถ้าเป็น -1 คือหมดไฟล์
+            while ((bytesRead = fis.read(buffer)) != -1) {
+                // 3. fos.write(buffer, 0, bytesRead)
+                //   - เขียนข้อมูลจาก 'buffer' (User Space) ลงไปยังไฟล์ปลายทาง (Kernel)
+                fos.write(buffer, 0, bytesRead);
+            }
+            // ** สรุป: ข้อมูลย้าย 4 ครั้ง (Kernel -> User -> Kernel) **
+        }
+    }
+
+    // ----------------------------------------------------------------------
+    // เมธอดที่ 2: การคัดลอกแบบ "Zero Copy"
+    // ----------------------------------------------------------------------
+    public static void zeroCopy(String from, String to) throws IOException {
+        // ใช้ try-with-resources เปิด Channel ต้นทาง และปลายทาง
+        try (FileChannel source = new FileInputStream(from).getChannel();
+             FileChannel destination = new FileOutputStream(to).getChannel()) {
+        
+            // **จุดสำคัญของ Zero Copy (File-to-File)**
+            // 1. สั่ง OS ย้ายข้อมูลโดยตรง
+            //
+            // source.transferTo(position, count, target)
+            //   - 0: เริ่มอ่านจากตำแหน่ง 0
+            //   - source.size(): อ่านทั้งหมด (ขนาดไฟล์)
+            //   - destination: ส่งข้อมูลไปที่ Channel ปลายทาง
+            //
+            // OS จะย้ายข้อมูลจาก File Buffer ของ 'source' (Kernel)
+            // ไปยัง File Buffer ของ 'destination' (Kernel) โดยตรง
+            // ข้อมูล "ไม่" ต้องวิ่งผ่าน Java Application (User Space) เลย
+            source.transferTo(0, source.size(), destination);
+            // ** สรุป: ข้อมูลย้ายใน Kernel โดยตรง (ถ้า OS รองรับ) **
+        }
+    }
+}
