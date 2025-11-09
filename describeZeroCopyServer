@@ -1,0 +1,131 @@
+// ----------------------------------------------------------------------
+// Import ที่จำเป็น
+// ----------------------------------------------------------------------
+
+// ใช้สำหรับ "อ่าน" ไฟล์จากดิสก์
+import java.io.FileInputStream; 
+// คลาสมาตรฐานสำหรับจัดการข้อผิดพลาดที่เกี่ยวกับการ I/O
+import java.io.IOException; 
+// ใช้สำหรับระบุ Port ที่ Server จะเปิดรอ
+import java.net.InetSocketAddress; 
+// "ท่อ" สำหรับการอ่าน/เขียนไฟล์ (NIO)
+import java.nio.channels.FileChannel; 
+// "ท่อ" สำหรับ "รอรับการเชื่อมต่อ" (NIO)
+import java.nio.channels.ServerSocketChannel; 
+// "ท่อ" สำหรับการสื่อสารกับ Client ที่เชื่อมต่อเข้ามา (NIO)
+import java.nio.channels.SocketChannel; 
+
+// ----------------------------------------------------------------------
+// คลาสหลักของ Server
+// ----------------------------------------------------------------------
+public class ZeroCopyServer {
+    // ใช้ throws IOException เพื่อโยนความรับผิดชอบในการจัดการ Error 
+    // ของ ServerSocketChannel.open() และ .bind() ไปที่ JVM
+    public static void main(String[] args) throws IOException{
+        
+        // ----------------------------------------------------------------------
+        // การตั้งค่า Server
+        // ----------------------------------------------------------------------
+        
+        // Port ที่จะเปิดรอการเชื่อมต่อ
+        int port = 9999; 
+        // ตำแหน่งไฟล์ที่จะอ่านและส่งไปให้ Client
+        String file_to_send = "..\\FileSend1\\TestFileSent";
+
+        // ----------------------------------------------------------------------
+        // เริ่มต้นการทำงาน (ใช้ try-with-resources)
+        // ----------------------------------------------------------------------
+        
+        // เปิด ServerSocketChannel (ท่อหลักสำหรับรอฟัง)
+        // และใช้ try-with-resources เพื่อให้มันถูก .close() อัตโนมัติเมื่อจบการทำงาน
+        try (ServerSocketChannel serverSocketChannel = ServerSocketChannel.open()){
+            
+            // สั่งให้ Server "ผูก" (bind) กับ Port ที่กำหนด
+            // เพื่อเริ่มรอการเชื่อมต่อที่ Port นี้
+            serverSocketChannel.bind(new InetSocketAddress(port));
+            System.out.println("Server กำลังรอการเชื่อมต่อที่ port " + port);
+
+            // Loop นี้จะทำงานตลอดไป เพื่อรอรับ Client ใหม่ๆ ได้เรื่อยๆ
+            while (true) {
+                System.out.println("\nกำลังรอ Client ใหม่เชื่อมต่อ...");
+
+                // ----------------------------------------------------------------------
+                // ส่วนจัดการ Client แต่ละราย (try-with-resources ซ้อน)
+                // ----------------------------------------------------------------------
+                
+                // try-with-resources นี้จะจัดการ Client ทีละคน
+                // เมื่อ Client คนนี้ตัดการเชื่อมต่อ ทรัพยากร (clientChannel, fileChannel)
+                // จะถูก .close() และ Loop while(true) จะวนกลับไป .accept() รอคนถัดไป
+                try(
+                    // 1. serverSocketChannel.accept()
+                    //   คำสั่งนี้จะ "หยุดรอ" (Block) จนกว่าจะมี Client เชื่อมต่อเข้ามา
+                    //   เมื่อเชื่อมต่อสำเร็จ จะคืนค่าเป็น SocketChannel (ท่อสื่อสารกับ Client)
+                    SocketChannel clientChannel = serverSocketChannel.accept();
+
+                    // 2. เปิด FileChannel (ท่อไฟล์)
+                    //   หลังจาก Client เชื่อมต่อแล้ว Server จะพยายามเปิดไฟล์ที่จะส่งทันที
+                    //   โดยสร้าง FileInputStream (Stream สำหรับอ่านไฟล์)
+                    //   แล้ว .getChannel() เพื่อเอา "ท่อ" ที่เชื่อมกับไฟล์นั้น
+                    FileChannel fileChannel = new FileInputStream(file_to_send).getChannel()
+                ){
+                    // เมื่อเชื่อมต่อและเปิดไฟล์สำเร็จ
+                    System.out.println("Client เชื่อมต่อเข้ามาจาก: "+ clientChannel.getRemoteAddress());
+                    
+                    // ตรวจสอบขนาดไฟล์ที่จะส่ง
+                    long fileSize = fileChannel.size();
+                    System.out.println("กำลังส่งไฟล์: " + file_to_send + " (" + fileSize + " bytes)");
+
+                    // ----------------------------------------------------------------------
+                    // ส่วนสำคัญ: การส่งไฟล์แบบ Zero Copy (Disk -> Network)
+                    // ----------------------------------------------------------------------
+                    
+                    // ตัวแปรนับจำนวนไบต์ที่ส่งไปแล้ว
+                    long totalBytesTransferred = 0; 
+                    // เริ่มจับเวลา
+                    long startTime = System.currentTimeMillis();
+
+                    // Loop นี้จำเป็น เพราะ .transferTo() อาจส่งไม่หมดในครั้งเดียว
+                    // (เช่น Network Buffer เต็ม) จึงต้องวนส่งจนกว่าจะครบ
+                    while (totalBytesTransferred < fileSize) {
+                        
+                        // นี่คือหัวใจของ Zero Copy ฝั่งส่ง
+                        // fileChannel.transferTo(position, count, target)
+                        //
+                        // สั่งให้ FileChannel (ต้นทาง) ส่งข้อมูล "ไปให้" clientChannel (ปลายทาง)
+                        //
+                        // - totalBytesTransferred: ตำแหน่งในไฟล์ที่จะเริ่มอ่าน (offset)
+                        // - (fileSize - totalBytesTransferred): จำนวนไบต์ที่ยังเหลือต้องส่ง
+                        // - clientChannel: ปลายทาง (ข้อมูลจะถูกส่งไปที่ Client คนนี้)
+                        //
+                        // **ทำไมถึงเป็น Zero Copy?**
+                        // OS (Kernel) จะย้ายข้อมูลจาก File Buffer (ใน Kernel)
+                        // ไปยัง Socket Buffer (ใน Kernel) โดยตรง
+                        // ข้อมูลไม่ต้องวิ่งผ่าน Java Application (User Space)
+                        long bytesTransferred = fileChannel.transferTo(
+                            totalBytesTransferred, 
+                            fileSize - totalBytesTransferred, 
+                            clientChannel
+                        );
+                        
+                        // อัปเดตจำนวนไบต์ที่ส่งไปแล้ว
+                        totalBytesTransferred += bytesTransferred; 
+                    }
+                    
+                    // หยุดจับเวลา
+                    long endTime = System.currentTimeMillis();
+                    System.out.println("ส่งไฟล์เรียบร้อย. ขนาดรวม: " + totalBytesTransferred);
+                    System.out.println("ใช้เวลาในการส่งไฟล์: " + (endTime - startTime) + " ms");
+                
+                } catch (IOException e) { 
+                    // ----------------------------------------------------------------------
+                    // การจัดการ Error (สำหรับ Client คนนั้นๆ)
+                    // ----------------------------------------------------------------------
+                    // ดักจับ Error ที่เกิดระหว่างการจัดการ Client เช่น
+                    // - Client ตัดการเชื่อมต่อกะทันหัน (Broken pipe)
+                    // - ไฟล์ที่จะส่งหาไม่เจอ (FileNotFoundException)
+                    System.err.println("เกิดข้อผิดพลาดระหว่างจัดการ Client: " + e.getMessage());
+                }
+            } // จบ while(true)
+        } // จบ try-with-resources (ServerSocketChannel)
+    }
+}
