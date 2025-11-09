@@ -1,0 +1,106 @@
+// ----------------------------------------------------------------------
+// Import ที่จำเป็น
+// ----------------------------------------------------------------------
+
+// ใช้สำหรับ "เขียน" ไฟล์ลงบนดิสก์
+import java.io.FileOutputStream; 
+
+// คลาสมาตรฐานสำหรับจัดการข้อผิดพลาดที่เกี่ยวกับการ I/O (Input/Output)
+import java.io.IOException; 
+
+// ใช้สำหรับระบุที่อยู่ IP Address และ Port ของ Server ที่จะเชื่อมต่อ
+import java.net.InetSocketAddress; 
+
+// "ท่อ" สำหรับการอ่าน/เขียนไฟล์ (ส่วนหนึ่งของ Java NIO)
+// เราจะใช้ตัวนี้เพื่อเขียนข้อมูลลงไฟล์ปลายทาง
+import java.nio.channels.FileChannel; 
+
+// "ท่อ" สำหรับการสื่อสารผ่านเครือข่ายแบบ TCP (ส่วนหนึ่งของ Java NIO)
+// เราจะใช้ตัวนี้เพื่อรับข้อมูลจาก Server
+import java.nio.channels.SocketChannel; 
+
+// ----------------------------------------------------------------------
+// คลาสหลักของ Client
+// ----------------------------------------------------------------------
+public class ZeroCopyClient {
+
+    public static void main(String[] args) {
+
+        // ----------------------------------------------------------------------
+        // การตั้งค่า Client
+        // ----------------------------------------------------------------------
+        
+        // Server ที่จะเชื่อมต่อ (localhost คือเครื่องตัวเอง)
+        String HOST = "localhost"; 
+        // Port ที่จะเชื่อมต่อ (ต้องตรงกับที่ Server เปิดรอ)
+        int PORT = 9999;           
+        // ตำแหน่งและชื่อไฟล์ที่จะบันทึกไฟล์ที่ได้รับมา
+        String file_to_save = "..\\FileSave\\TestFileDownloadedZeroCopy"; 
+
+        // ----------------------------------------------------------------------
+        // เริ่มต้นการทำงาน (ใช้ try-with-resources)
+        // ----------------------------------------------------------------------
+        
+        // try-with-resources: 
+        // ทรัพยากร (SocketChannel, FileChannel) ที่เปิดในวงเล็บนี้
+        // จะถูก .close() อัตโนมัติไม่ว่าจะทำงานสำเร็จหรือเกิด Exception
+        // ช่วยป้องกันปัญหา Resource Leak
+        try (
+            // 2. เปิด SocketChannel (ท่อเครือข่าย)
+            // และสั่ง .open() พร้อมเชื่อมต่อ (connect) ไปยัง Server ทันที
+            SocketChannel socketChannel = SocketChannel.open(new InetSocketAddress(HOST, PORT));
+            
+            // 3. เปิด FileChannel (ท่อไฟล์)
+            // โดยสร้าง FileOutputStream (Stream สำหรับเขียนไฟล์) ก่อน
+            // แล้ว .getChannel() เพื่อเอา "ท่อ" ที่เชื่อมกับไฟล์นั้น
+            FileChannel fileChannel = new FileOutputStream(file_to_save).getChannel()
+        ) {
+
+            System.out.println("Client: เชื่อมต่อ Server สำเร็จที่ " + socketChannel.getRemoteAddress());
+            System.out.println("Client: พร้อมรับไฟล์, บันทึกไปที่ " + file_to_save);
+
+            // ----------------------------------------------------------------------
+            // ส่วนสำคัญ: การรับไฟล์แบบ Zero Copy (Network -> Disk)
+            // ----------------------------------------------------------------------
+            
+            // เริ่มจับเวลา
+            long startTime = System.currentTimeMillis();
+
+            // นี่คือหัวใจของ Zero Copy ฝั่งรับ
+            // fileChannel.transferFrom(source, position, count)
+            //
+            // สั่งให้ FileChannel (ปลายทาง) ดึงข้อมูล "จาก" socketChannel (ต้นทาง)
+            //
+            // - socketChannel: แหล่งข้อมูล (ข้อมูลที่วิ่งมาจากเครือข่าย)
+            // - 0: เริ่มเขียนลงไฟล์ที่ตำแหน่ง (position) 0 (ไบต์แรกสุด)
+            // - Long.MAX_VALUE: พยายามอ่านข้อมูลให้มากที่สุดเท่าที่จะทำได้ 
+            //   (ในที่นี้คือรอจนกว่า Server จะส่งมาหมดและปิดการเชื่อมต่อ)
+            //
+            // **ทำไมถึงเป็น Zero Copy?**
+            // ปกติเราต้องสร้าง byte[] buffer ใน Java (User Space)
+            // แล้วอ่านจาก Socket -> Buffer (Kernel to User)
+            // แล้วเขียนจาก Buffer -> File (User to Kernel)
+            //
+            // แต่ .transferFrom() สั่งให้ OS (Kernel) ย้ายข้อมูล
+            // จาก Socket Buffer (ใน Kernel) ไปยัง File Buffer (ใน Kernel) โดยตรง
+            // ข้อมูลไม่ต้องวิ่งผ่าน Java Application (User Space) เลย
+            long totalBytesTransferred = fileChannel.transferFrom(socketChannel, 0, Long.MAX_VALUE);
+            
+            // หยุดจับเวลา
+            long endTime = System.currentTimeMillis();
+            
+            System.out.println("Client: รับไฟล์เรียบร้อย. ขนาดรวม: " + totalBytesTransferred + " bytes");
+            System.out.println("Client: ใช้เวลาในการรับไฟล์: " + (endTime - startTime) + " ms");
+
+        } catch (IOException e) {
+            // ----------------------------------------------------------------------
+            // การจัดการ Error
+            // ----------------------------------------------------------------------
+            // ดักจับข้อผิดพลาดที่อาจเกิดขึ้น เช่น
+            // - Server ปิด / เชื่อมต่อไม่ได้ (Connection refused)
+            // - เขียนไฟล์ไม่ได้ (Permission denied)
+            System.err.println("Client: เกิดข้อผิดพลาดในการเชื่อมต่อ หรือ รับส่งไฟล์: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+}
