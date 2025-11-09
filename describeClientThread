@@ -16,14 +16,14 @@ import java.util.List;              // ⬅️ เครื่องมือเ�
  * มันจะเปิดการเชื่อมต่อหลายๆ ครั้งพร้อมกันเพื่อดาวน์โหลดไฟล์ทีละส่วน
  * (ทำงานคู่กับ ZeroCopyServer_Chunked หรือ ZeroCopyServer_ThreadPool ก็ได้)
  */
-public class ZeroCopyClient_Chunked {
+public class ZeroCopyClient_Thread1 {
 
     /*
      * ========= CONFIGURATION (ค่าตั้งค่า) =========
      */
-    static final String HOST = "localhost"; // ⬅️ Server อยู่ที่ไหน
-    static final int PORT = 9999;           // ⬅️ Server ใช้ Port อะไร
-    static final String FILE_TO_SAVE = "..\\\\FileSave\\\\TestFileDownloadedZeroCopy"; // ⬅️ จะบันทึกไฟล์ชื่ออะไร
+    static  String HOST = "localhost"; // ⬅️ Server อยู่ที่ไหน
+    static  int PORT = 9999;           // ⬅️ Server ใช้ Port อะไร
+    static  String FILE_TO_SAVE = "..\\\\FileSave\\\\TestFileDownloadedZeroCopy"; // ⬅️ จะบันทึกไฟล์ชื่ออะไร
     
     // ⬇️ ⬇️ นี่คือหัวใจของ Client ⬇️ ⬇️
     static final int NUM_THREADS = 8; // ⬅️ จำนวน "คนงาน" (Threads) ที่จะใช้ "รุม"
