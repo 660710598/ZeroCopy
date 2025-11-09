@@ -11,8 +11,6 @@ import java.util.concurrent.Executors;
 
 public class ZeroCopyServer_ThreadPool { 
 
-    
-    
     //สร้าง พนักงาน 10 คน รอไว้
     static  int NUM_WORKER_THREADS = 10;
     static  ExecutorService executor = Executors.newFixedThreadPool(NUM_WORKER_THREADS);
@@ -72,17 +70,17 @@ public class ZeroCopyServer_ThreadPool {
                 long start = in.readLong();
                 long end = in.readLong();
                 long size = end - start + 1;
-                System.out.println("  (Thread " + Thread.currentThread().getId() + ") Sending bytes " + start + " to " + end);
+                System.out.println("  (Thread " + Thread.currentThread().threadId() + ") Sending bytes " + start + " to " + end);
 
                 long total = 0;
                 while (total < size) {
                     long transferred = fc.transferTo(start + total, size - total, channel);
                     total += transferred;
                 }
-                System.out.println("  (Thread " + Thread.currentThread().getId() + ") Sent " + total + " bytes.");
+                System.out.println("  (Thread " + Thread.currentThread().threadId() + ") Sent " + total + " bytes.");
 
             } catch (Exception e) {
-                System.err.println("  (Thread " + Thread.currentThread().getId() + ") Error: " + e.getMessage());
+                System.err.println("  (Thread " + Thread.currentThread().threadId() + ") Error: " + e.getMessage());
             }
         }
     }
