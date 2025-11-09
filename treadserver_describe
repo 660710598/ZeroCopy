@@ -1,0 +1,102 @@
+public class ZeroCopyServerThread {
+    
+    public static void main(String[] args) throws IOException {
+        // ... ตั้งค่า port และ ชื่อไฟล์ ...
+
+        // 1. เปิด Server รอที่ประตู (port 9999)
+        try (ServerSocketChannel serverSocketChannel = ServerSocketChannel.open()) {
+            serverSocketChannel.bind(new InetSocketAddress(port));
+            System.out.println("Server (Chunked) เปิดรอที่ port " + port);
+
+            // 2. วนลูปไม่รู้จบ เพื่อรอรับแขกตลอดเวลา
+            while (true) {
+                try {
+                    // 3. (สำคัญ) "รอ" จนกว่าจะมีแขกมาเคาะประตู
+                    //    เมื่อแขกมา จะได้ "สาย" (SocketChannel) ไว้คุยกับแขกคนนั้น
+                    SocketChannel clientChannel = serverSocketChannel.accept();
+                    System.out.println("\nมี Client ใหม่เชื่อมต่อ: " + clientChannel.getRemoteAddress());
+
+                    // 4. (สำคัญมาก) สร้าง "ผู้ช่วย" (ChunkHandler) ขึ้นมา
+                    ChunkHandler handler = new ChunkHandler(clientChannel, file_to_send);
+                    
+                    // 5. สร้าง Thread ใหม่ และสั่งให้ "ผู้ช่วย" เริ่มทำงาน
+                    Thread thread = new Thread(handler);
+                    thread.start();
+                    
+                    // 6. พนักงานต้อนรับ (Thread หลัก) "ไม่รอ" ผู้ช่วย
+                    //    รีบกลับไปรอรับแขกคนต่อไปทันที (วนกลับไปข้อ 3)
+                    System.out.println("Main Thread กลับไปรอ Client คนต่อไป...");
+
+                } catch (IOException e) {
+                    // ...
+                }
+            }
+        }
+    }
+}
+class ChunkHandler implements Runnable {
+    
+    SocketChannel clientChannel; // "สาย" ที่คุยกับ Client คนนี้
+    String file_to_send;      // "ไฟล์" ที่จะใช้ส่ง
+
+    // ... Constructor (รับ 2 ค่านี้มาเก็บไว้) ...
+
+    // (สำคัญ) นี่คือสิ่งที่ Thread ใหม่จะทำ
+    @Override
+    public void run() {
+       long threadId = Thread.currentThread().threadId(); // เอาไว้ดู Log
+       
+       // ใช้ try-with-resources เพื่อให้ Java ปิด Channel ให้อัตโนมัติ
+       // (เราใช้วิธีสร้าง channelToClose เพื่อแก้ปัญหา "final")
+       try (SocketChannel channelToClose = this.clientChannel;
+            FileChannel fileChannel = new FileInputStream(this.file_to_send).getChannel())
+       {
+   
+          // --- ขั้นตอนที่ 1: ส่งขนาดไฟล์ทั้งหมด (ทักทาย) ---
+          // Client ต้องรู้ก่อนว่าไฟล์ทั้งหมดใหญ่แค่ไหน ถึงจะคำนวณแบ่งส่วนได้
+          long fileSize = fileChannel.size();
+          ByteBuffer sizeBuffer = ByteBuffer.allocate(8); // long = 8 bytes
+          sizeBuffer.putLong(fileSize);
+          sizeBuffer.flip(); // พลิกด้าน buffer เพื่อเตรียม "ส่ง"
+          channelToClose.write(sizeBuffer); // ส่ง 8 bytes นี้ไป
+          System.out.println("Thread " + threadId + ": ส่งขนาดไฟล์ (" + fileSize + " bytes) ให้ Client แล้ว");
+
+          // --- ขั้นตอนที่ 2: รอรับคำสั่ง (จดออเดอร์) ---
+          // ตอนนี้ Server จะ "รอ" ให้ Client บอกว่าจะเอาส่วนไหน
+          ByteBuffer requestBuffer = ByteBuffer.allocate(16); // รอ long 2 ตัว (8+8)
+          
+          while (requestBuffer.hasRemaining()) {
+              channelToClose.read(requestBuffer); // อ่าน 16 bytes จาก Client
+          }
+          requestBuffer.flip(); // พลิกด้าน buffer เพื่อเตรียม "อ่าน"
+
+          // ถอดรหัส 16 bytes นั้นออกมา
+          long startPosition = requestBuffer.getLong(); // 8 bytes แรก
+          long bytesToTransfer = requestBuffer.getLong(); // 8 bytes หลัง
+          
+          System.out.println("Thread " + threadId + ": ได้รับคำสั่ง: เริ่มที่ " + startPosition + ", ต้องการ " + bytesToTransfer + " bytes");
+
+          // --- ขั้นตอนที่ 3: ส่งไฟล์เฉพาะส่วน (เสิร์ฟ) ---
+          // นี่คือหัวใจของ Zero Copy
+          System.out.println("Thread " + threadId + ": กำลังส่งไฟล์ส่วนนี้");
+          
+          long bytesSent = fileChannel.transferTo(
+              startPosition,   // 1. เริ่มอ่านจากตำแหน่งที่ Client ขอ
+              bytesToTransfer, // 2. เป็นจำนวนเท่าที่ Client ขอ
+              channelToClose   // 3. ส่งตรงไปที่ Client (Zero Copy)
+          );
+          
+          System.out.println("Thread " + threadId + ": ส่งสำเร็จ!...");
+        
+        } catch (IOException e) { 
+            // ถ้า Client ตัดสาย หรือไฟล์มีปัญหา
+            System.err.println("Thread " + threadId + ": เกิด Error: " + e.getMessage());
+        }
+        
+        // เมื่องานเสร็จ (ไม่ว่าจะสำเร็จหรือ Error) try-with-resources จะปิด Channel
+        // และเมื่อเมธอด run() จบ Thread นี้ก็จะตายไป
+        System.out.println("Thread " + threadId + ": ทำงานเสร็จสิ้น ปิดการเชื่อมต่อ");
+    }
+    
+    // ... (เมธอด getRemoteAddressSafe ไว้พิมพ์ log เฉยๆ) ...
+}
