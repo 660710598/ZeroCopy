@@ -1,0 +1,195 @@
+/*
+ * ========= IMPORTS =========
+ */
+import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.nio.channels.FileChannel;
+import java.nio.channels.SocketChannel;
+import java.io.DataInputStream;     // สำหรับอ่าน "คำสั่ง" (long)
+import java.io.DataOutputStream;    // สำหรับส่ง "คำสั่ง" (String, long)
+import java.io.RandomAccessFile; // ⬅️ หัวใจหลัก: "เขียนไฟล์แบบกระโดด"
+import java.util.ArrayList;         // ⬅️ เครื่องมือเก็บรายชื่อ "คนงาน"
+import java.util.List;              // ⬅️ เครื่องมือเก็บรายชื่อ "คนงาน"
+
+/**
+ * นี่คือ Client เวอร์ชัน "Chunked" (แบบ "รุม")
+ * มันจะเปิดการเชื่อมต่อหลายๆ ครั้งพร้อมกันเพื่อดาวน์โหลดไฟล์ทีละส่วน
+ * (ทำงานคู่กับ ZeroCopyServer_Chunked หรือ ZeroCopyServer_ThreadPool ก็ได้)
+ */
+public class ZeroCopyClient_Chunked {
+
+    /*
+     * ========= CONFIGURATION (ค่าตั้งค่า) =========
+     */
+    static final String HOST = "localhost"; // ⬅️ Server อยู่ที่ไหน
+    static final int PORT = 9999;           // ⬅️ Server ใช้ Port อะไร
+    static final String FILE_TO_SAVE = "..\\\\FileSave\\\\TestFileDownloadedZeroCopy"; // ⬅️ จะบันทึกไฟล์ชื่ออะไร
+    
+    // ⬇️ ⬇️ นี่คือหัวใจของ Client ⬇️ ⬇️
+    static final int NUM_THREADS = 8; // ⬅️ จำนวน "คนงาน" (Threads) ที่จะใช้ "รุม"
+
+    /*
+     * ========= MAIN (ผู้จัดการ 🧠) =========
+     */
+    public static void main(String[] args) throws IOException, InterruptedException {
+
+        System.out.println("Chunked Client Started...");
+        System.out.println("Will connect to " + HOST + ":" + PORT + " with " + NUM_THREADS + " threads.");
+        long startTime = System.currentTimeMillis();
+
+        // --------------------------------------
+        // Phase 1: "วางแผน" (ถามขนาดไฟล์)
+        // --------------------------------------
+        long fileSize = getFileSize(); // (ดูเมธอด getFileSize() ข้างล่าง)
+        if (fileSize == -1) {
+            System.err.println("Could not get file size. Aborting.");
+            return;
+        }
+        System.out.println("Total file size: " + fileSize + " bytes (" + (fileSize / 1024 / 1024) + " MB)");
+
+        // --------------------------------------
+        // Phase 2: "เตรียมพื้นที่"
+        // --------------------------------------
+        // เราต้อง "จองพื้นที่" ไฟล์บนดิสก์ให้เท่าขนาดจริงก่อน
+        // เราใช้ "RandomAccessFile" เพราะมันทำได้
+        try (RandomAccessFile raf = new RandomAccessFile(FILE_TO_SAVE, "rw")) {
+            raf.setLength(fileSize); // "ยืด" ไฟล์นี้ให้มีขนาดเท่า fileSize (ข้างในว่างเปล่า)
+        }
+        System.out.println("Created placeholder file: " + FILE_TO_SAVE);
+
+        // --------------------------------------
+        // Phase 3: "แบ่งงาน"
+        // --------------------------------------
+        long partSize = fileSize / NUM_THREADS; // 1 งาน (1 Thread) ต้องโหลดกี่ไบต์
+        long currentStart = 0; // จุดเริ่มต้นของงานแรก
+        List<Thread> threads = new ArrayList<>(); // "สมุดจด" รายชื่อคนงาน
+
+        // วนลูปเพื่อ "จ้างคนงาน" 8 คน
+        for (int i = 0; i < NUM_THREADS; i++) {
+            
+            long currentEnd;
+            if (i == NUM_THREADS - 1) {
+                // ถ้าเป็นคนงาน "คนสุดท้าย" ให้เอาส่วนที่เหลือทั้งหมด
+                // (ป้องกันปัญหาหารไม่ลงตัว)
+                currentEnd = fileSize - 1; 
+            } else {
+                currentEnd = currentStart + partSize - 1;
+            }
+
+            // สร้าง "ใบงาน" (Runnable)
+            Runnable worker = new FileDownloaderHandler(currentStart, currentEnd);
+            
+            // สร้าง "คนงาน" (Thread) และยื่น "ใบงาน" ให้
+            Thread t = new Thread(worker);
+            t.start(); // สั่งคนงาน "เริ่มทำงาน" (ไปที่ run() ข้างล่าง)
+            threads.add(t); // "จดชื่อ" คนงานไว้ใน List
+
+            System.out.println("  Started Thread " + i + ": (bytes " + currentStart + " to " + currentEnd + ")");
+            
+            // ขยับจุดเริ่มต้นสำหรับคนงานคนต่อไป
+            currentStart += partSize; 
+        }
+
+        // --------------------------------------
+        // Phase 4: "รอคนงาน"
+        // --------------------------------------
+        // "ผู้จัดการ" (Main Thread) จะต้องรอจนกว่า "คนงาน" ทั้ง 8 คนจะทำเสร็จ
+        for (Thread t : threads) {
+            t.join(); // .join() คือการ "หยุดรอ" จนกว่า Thread t นี้จะตาย (ทำงานเสร็จ)
+        }
+
+        // --- เมื่องานเสร็จ ---
+        long endTime = System.currentTimeMillis();
+        System.out.println("\nDownload complete!");
+        System.out.println("Total time: " + (endTime - startTime) + " ms");
+    }
+
+    /**
+     * เมธอดช่วย: สำหรับเชื่อมต่อ Server "ครั้งที่ 1" เพื่อถาม "SIZE"
+     */
+    private static long getFileSize() throws IOException {
+        // ใช้ try-with-resources เพื่อให้ Socket ปิดเอง
+        try (SocketChannel socketChannel = SocketChannel.open(new InetSocketAddress(HOST, PORT));
+             DataInputStream in = new DataInputStream(socketChannel.socket().getInputStream());
+             DataOutputStream out = new DataOutputStream(socketChannel.socket().getOutputStream())) {
+
+            // 1. ส่งคำสั่ง "SIZE"
+            out.writeUTF("SIZE"); 
+            out.flush();
+            
+            // 2. รับคำตอบ (ขนาดไฟล์)
+            return in.readLong(); 
+
+        } catch (IOException e) {
+            System.err.println("Error getting file size: " + e.getMessage());
+            return -1; // คืนค่า -1 ถ้าล้มเหลว
+        }
+    }
+
+    /*
+     * ========= FileDownloaderHandler (คนงานดาวน์โหลด 👷) =========
+     *
+     * นี่คือ "ใบงาน" (Runnable) ที่ "คนงาน" (Thread) แต่ละคนจะทำ
+     * มันมีหน้าที่ดาวน์โหลดไฟล์ "เฉพาะส่วน" ที่ได้รับมอบหมาย
+     */
+    public static class FileDownloaderHandler implements Runnable {
+        private long start; // ไบต์เริ่มต้น (ที่ฉันต้องรับผิดชอบ)
+        private long end;   // ไบต์สุดท้าย (ที่ฉันต้องรับผิดชอบ)
+
+        public FileDownloaderHandler(long start, long end) {
+            this.start = start;
+            this.end = end;
+        }
+
+        @Override
+        public void run() {
+            // "คนงาน" (Thread) เริ่มทำงาน
+            try (
+                // 1. "คนงาน" แต่ละคน "เชื่อมต่อ Server ใหม่" (สำคัญมาก!)
+                SocketChannel serverSocket = SocketChannel.open(new InetSocketAddress(HOST, PORT));
+                
+                // 2. เปิด "ไฟล์ปลายทาง" (ไฟล์เดียวกันกับที่ main สร้างไว้)
+                //    "rw" = Read/Write mode
+                RandomAccessFile raf = new RandomAccessFile(FILE_TO_SAVE, "rw");
+                
+                // 3. เอา FileChannel ออกมาจาก RandomAccessFile
+                FileChannel fc = raf.getChannel(); 
+                
+                // 4. เตรียม Stream สำหรับ "ส่งคำสั่ง"
+                DataOutputStream out = new DataOutputStream(serverSocket.socket().getOutputStream())
+            ) {
+                // 5. ส่งคำสั่ง "GET" และ "ช่วง" ที่ตัวเองรับผิดชอบ
+                out.writeUTF("GET");    // (Server จะรู้ว่านี่คืองาน "ส่งของ")
+                out.writeLong(start); // ส่ง "ไบต์เริ่มต้น"
+                out.writeLong(end);   // ส่ง "ไบต์สุดท้าย"
+                out.flush();
+                
+                // 6. 🌟 หัวใจหลัก: Zero Copy (transferFrom) + Random Access 🌟
+                //    เราจะ "ดูด" ข้อมูลจาก Server มาใส่ใน "ส่วน" ของเรา
+                long total = 0; // ตัวนับว่าเราดูดมาเท่าไหร่แล้ว (สำหรับก้อนนี้)
+                long size = end - start + 1; // ขนาดก้อนนี้ที่ต้องดูด
+                
+                while (total < size) {
+                    // fc.transferFrom(source, position, count)
+                    //   source:   ดูดจาก "serverSocket"
+                    //   position: "เริ่มเขียน" ลงไฟล์ที่ตำแหน่ง "start + total"
+                    //   count:    ดูดมาเป็นจำนวน "size - total" (ส่วนที่เหลือ)
+                    long transferred = fc.transferFrom(serverSocket, start + total, size - total);
+                    
+                    if (transferred <= 0 && total < size) {
+                         // ป้องกัน Server หยุดส่งกลางคัน
+                         throw new IOException("Server stopped sending data unexpectedly.");
+                    }
+                    total += transferred;
+                }
+                
+                // System.out.println("  Finished Thread (bytes " + start + " to " + end + ")");
+
+            } catch (Exception e) {
+                // ถ้า Thread (คนงาน) คนนี้มีปัญหา
+                System.err.println("  Error in Thread (bytes " + start + "): " + e.getMessage());
+            }
+            // เมื่อ "run()" จบ "คนงาน" (Thread) คนนี้ก็ตาย (ทำงานเสร็จ)
+        }
+    }
+}
