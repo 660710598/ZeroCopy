@@ -10,10 +10,10 @@ import java.util.List;
 
 public class ZeroCopyClient_Thread {
 
-    static final String HOST = "localhost";
-    static final int PORT = 9999;
-    static final String FILE_TO_SAVE = "..\\\\FileSave\\\\TestFileDownloadedZeroCopy";
-    static final int NUM_THREADS = 4; 
+    static  String HOST = "localhost";
+    static  int PORT = 9999;
+    static  String FILE_TO_SAVE = "..\\\\FileSave\\\\TestFileDownloadedZeroCopy";
+    static  int NUM_THREADS = 4; 
 
     public static void main(String[] args) throws IOException, InterruptedException {
 
